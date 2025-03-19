@@ -1,0 +1,849 @@
+---
+title: "Help Seeking Behavior in Austrian General Population"
+author: "Marina Zeldovich"
+date: "2024-12-09"
+output: html_document
+toc: true
+---
+
+# Packages {.tabset .tabset-fade .tabset-pills}
+
+```{r packages, message=FALSE, warning=FALSE}
+library(haven)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(table1)
+library(likert)
+library(psych)
+library(viridis)
+library(corrplot)
+library(lavaan)
+library(semPlot)
+library(emmeans)
+library(car)
+```
+
+# Data {.tabset .tabset-fade .tabset-pills}
+
+```{r data}
+load("data_cleaned.RData")
+```
+
+```{r data overview}
+# glimpse(d1)
+```
+
+# Descriptive Statistics {.tabset .tabset-fade .tabset-pills}
+
+```{r descriptive}
+#sociodemographics
+table1(~gender +
+       age +
+       education +
+       income +
+       occupation +
+       state +
+       migration +
+       german_mother_tongue +
+       marital,
+       digits.pct = 0,
+#       round.median.min.max = TRUE,
+       data = d1)
+``` 
+
+```{r}
+# symptom burden
+table1(~ ghsq_total +
+       ghsq_fam_friends +
+       ghsq_professionals +
+       ghsq_semiprofessionals +
+       ssosh_total +
+       soep_total +
+       soep_total_cat +
+       pss_total +
+       pss_total_cat +
+       phq_total +
+       phq_total_cat_dicho +
+       gad_total +
+       gad_total_cat_dicho, data = d1)
+```
+
+```{r}
+quantile(d1$soep_total, probs = 0.80)
+```
+
+# GHSQ {.tabset .tabset-fade .tabset-pills}
+
+## Reliability
+
+```{r ghsq-reliability1}
+psych::reliability(d1 %>% dplyr::select("ghsq1":"ghsq10"))  # alpha = 0.71, omega = 0.75
+```
+
+The subscale realiability is rather low.
+
+```{r ghsq-reliability fam friends}
+# psych::reliability(d1 %>% dplyr::select("ghsq1":"ghsq4"))  # alpha = 0.64, omega = 0.70
+```
+
+```{r ghsq-reliability professionals}
+# psych::reliability(d1 %>% dplyr::select("ghsq5", "ghsq7", "ghsq9")) # alpha = 0.57, omega = 0.62
+```
+
+```{r ghsq-reliability semiprofessionals}
+# psych::reliability(d1 %>% dplyr::select("ghsq6", "ghsq8")) # no estimates
+```
+
+## Response patterns
+
+```{r ghsq-patterns}
+table1(~ as.factor(ghsq1) +
+         as.factor(ghsq2) +
+         as.factor(ghsq3) +
+         as.factor(ghsq4) +
+         as.factor(ghsq5) +
+         as.factor(ghsq6) +
+         as.factor(ghsq7) +
+         as.factor(ghsq8) +
+         as.factor(ghsq9) +
+         as.factor(ghsq10),
+       data = d1)
+```
+
+```{r}
+ghsq_items <- c("Intimate partner",
+                "Friend",
+                "Parent",
+                "Other relative",
+                "Mental health professional",
+                "Help line",
+                "General practitioner",
+                "Minister or religious leader",
+                "Other",
+                "None")
+
+ghsq_values <- c("Extremely unlikely", "2", "Unlikely", "4", "Likely", "6", "Extremely likely")
+```
+
+```{r}
+ghsq_pct <-
+  d1 %>%
+  dplyr::select(ghsq1:ghsq10) %>%  
+  setNames(ghsq_items) %>%              # Rename the columns using item short names
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  mutate(value = factor(value, levels = 1:7, labels = ghsq_values)) %>%  # Transform values to factors
+  group_by(variable, value) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(variable) %>%                 # Group by variable for percentage calculation
+  mutate(percentage = (count / sum(count)) * 100) %>%  # Calculate percentages
+  select(-count) %>%                     # Remove count column
+  pivot_wider(names_from = variable, values_from = percentage, values_fill = 0) %>% # Final table
+  select(value, all_of(ghsq_items))  # Ensure column order matches GHSQ item appereance in the questionnaire
+```
+
+```{r fig.width=10, fig.height=5}
+#pdf("02_figures/Figure2_Helpseeking.pdf", width = 10, height = 5)
+ghsq_pct %>%
+  pivot_longer(cols = -value, names_to = "variable", values_to = "percentage") %>%
+  mutate(variable = factor(variable, levels = rev(ghsq_items))) %>% 
+  ggplot(aes(x = variable, y = percentage, fill = value)) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_text(aes(label = ifelse(percentage > 5, sprintf("%.1f%%", percentage), ""),
+                color = value), 
+            size = 3,
+            position = position_stack(vjust = 0.5)) +
+  coord_flip() +  # Flip the axes
+  scale_fill_viridis_d() +  # Apply viridis color palette
+  scale_color_manual(values = c("Extremely unlikely" = "white",
+                                "2" = "white",
+                                "Unlikely" = "white",
+                                "4" = "white",
+                                "Likely" = "black",
+                                "6" = "black",
+                                "Extremely likely" = "black")) + 
+  theme_minimal() +
+   guides(fill = guide_legend(nrow = 1, 
+                              override.aes = list(label = ""),
+                              reverse = T), 
+          color = guide_legend(nrow = 1, 
+                               reverse = T)) + # Display color legend in one line
+  labs(x = "", 
+       y = "Percentage", fill = "", color = "") +  # Add legend for color, skip letters, reverse order
+  theme(axis.text.y = element_text(size = 10), 
+        legend.text = element_text(size = 10), 
+        legend.position = "bottom")
+#dev.off()
+```
+
+## Help received
+
+```{r}
+# at least one clinically relevant stress or symptom burden
+
+d1$burden <- 
+  ifelse(d1$soep_total_cat == "notable level of loneliness" |
+           d1$isi_total_cat_dicho == "clinical insomnia" |
+           d1$cage_total_cat == "suspected alcohol misuse" |
+           d1$pss_total_cat == "high stress" | 
+           d1$phq_total_cat_dicho == "clinical level of depression" | 
+           d1$gad_total_cat_dicho == "clinical level of anxiety", 1, 0)
+
+```
+
+```{r}
+d1$burden <- factor(d1$burden, levels = 0:1, labels = c("No burden", "Stress/symptom burden"))
+```
+
+```{r}
+prop.table(table(d1$burden))
+```
+
+```{r}
+# ghsq_received <- d1 %>%
+#   dplyr::select(gender, age, migration, state, ghsq_help1:ghsq_help8, ghsq_help10)
+```
+
+```{r}
+# ghsq_received[grepl("ghsq", names(ghsq_received))] <- 
+#   apply(ghsq_received[grepl("ghsq", names(ghsq_received))], 2, function(x){ifelse(x == 1, 0, 1)})
+```
+
+```{r}
+ghsq_received_items <- c("Intimate \n partner",
+                "Friend",
+                "Parent",
+                "Other \n relative",
+                "Mental health \n professional",
+                "Help line",
+                "General \n practitioner",
+                "Minister or \n religious leader",
+                "Other",
+                "None")
+```
+
+
+```{r}
+ghsq_received_values <- c("Yes", "No")
+```
+
+```{r}
+ghsq_received_pct <-
+  d1 %>%
+  dplyr::select(ghsq_help1:ghsq_help10) %>%  
+  setNames(ghsq_received_items) %>%             
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  mutate(value = factor(value, levels = 1:2, labels = ghsq_received_values)) %>%  
+  group_by(variable, value) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(variable) %>%                 
+  mutate(percentage = (count / sum(count)) * 100) %>%  
+  select(-count) %>%                     
+  pivot_wider(names_from = variable, values_from = percentage, values_fill = 0) %>% 
+  select(value, all_of(ghsq_received_items))
+```
+
+```{r fig.width=10, fig.height=5}
+#pdf("02_figures/FigureA2_Helpreceived.pdf", width = 10, height = 5)
+ghsq_received_pct %>% 
+  pivot_longer(cols = -value, names_to = "variable", values_to = "percentage") %>%
+  mutate(variable = factor(variable, levels = ghsq_received_items)) %>% 
+  ggplot(aes(x = variable, y = percentage, fill = value)) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_text(aes(label = ifelse(percentage > 5, sprintf("%.1f%%", percentage), ""),
+                color = value), 
+            size = 3,
+            position = position_stack(vjust = 0.5)) +
+  scale_fill_viridis_d() +  
+  scale_color_manual(values = c("No" = "black",
+                                "Yes" = "white")) + 
+  theme_minimal() +
+  guides(fill = guide_legend(nrow = 1, 
+                             override.aes = list(label = ""),
+                             reverse = F), 
+         color = guide_legend(nrow = 1, 
+                              reverse = F)) + 
+  labs(x = "", 
+       y = "Percentage", fill = "", color = "") +  
+  theme(axis.text.y = element_text(size = 10), 
+        legend.text = element_text(size = 10), 
+        legend.position = "bottom")
+#dev.off()
+```
+
+```{r}
+ghsq_received_pct2 <-
+  d1 %>%
+  dplyr::select(burden, ghsq_help1:ghsq_help10) %>%  
+  setNames(c("burden", ghsq_received_items)) %>%               
+  pivot_longer(cols = -burden, names_to = "variable", values_to = "value") %>%
+  mutate(value = factor(value, levels = 1:2, labels = ghsq_received_values)) %>%  
+  group_by(burden, variable, value) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(burden, variable) %>%  
+  mutate(percentage = (count / sum(count)) * 100) %>%  
+  select(-count) %>%  # Remove count column
+  pivot_wider(names_from = variable, values_from = percentage, values_fill = 0) %>% 
+  select(burden, value, all_of(ghsq_received_items))
+
+```
+
+```{r fig.width=10, fig.height=7}
+#pdf("02_figures/Figure3_Helpreceived.pdf", width = 10, height = 5)
+# Plot grouped by burden
+ghsq_received_pct2 %>% 
+  pivot_longer(cols = -c(burden, value), names_to = "variable", values_to = "percentage") %>%
+  mutate(variable = factor(variable, levels = ghsq_received_items)) %>%
+  ggplot(aes(x = variable, y = percentage, fill = value)) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_text(aes(label = ifelse(percentage > 5, sprintf("%.1f%%", percentage), ""),
+                color = value),
+            size = 3, position = position_stack(vjust = 0.5)) +
+  scale_fill_viridis_d() +  
+  scale_color_manual(values = c("No" = "black",
+                                "Yes" = "white")) + 
+  theme_minimal() +
+  guides(fill = guide_legend(nrow = 1, 
+                             override.aes = list(label = ""),
+                             reverse = F), 
+         color = guide_legend(nrow = 1, 
+                              reverse = F)) +
+  labs(x = "", 
+       y = "Percentage", fill = "", color = "") +
+  theme(axis.text.y = element_text(size = 10), 
+        legend.text = element_text(size = 10), 
+        legend.position = "bottom") +
+  facet_wrap(~burden, ncol = 1)  
+#dev.off()
+```
+
+# Self-stigmatization {.tabset .tabset-fade .tabset-pills}
+
+## Reliability
+
+```{r self-stigmatization-reliability}
+psych::reliability(d1 %>% dplyr::select("ssosh1":"ssosh10"))
+```
+# Symptom burden {.tabset .tabset-fade .tabset-pills}
+
+## Correlation matrix
+
+```{r}
+cor_data <-
+  d1 %>%
+  dplyr::select(ghsq_total, ghsq_fam_friends, ghsq_professionals, ghsq_semiprofessionals, 
+                ssosh_total, soep_total, isi_total, cage_total, pss_total, phq_total, gad_total)
+```
+
+```{r}
+cor_matrix <- cor(cor_data %>% dplyr::select(ghsq_total, ghsq_fam_friends, ghsq_professionals, ghsq_semiprofessionals,
+                                       ssosh_total, soep_total, isi_total, cage_total, pss_total, phq_total, gad_total))
+```
+
+```{r}
+cor_labels <- c("GHSQ Total", "GHSQ Family and Friends", "GHSQ Professionals", "GHSQ Semiprofessionals", 
+                "SSOSH", "SOEP", "ISI-7", "CAGE", "PSS-4", "PHQ-9", "GAD-7")
+
+```
+
+```{r}
+rownames(cor_matrix) <- cor_labels
+colnames(cor_matrix) <- cor_labels
+```
+
+```{r fig.width=6, fig.height=6}
+#pdf("02_figures/Figure4_Correlations.pdf", width = 8, height = 7)
+corrplot(cor_matrix, 
+         method = "number", 
+         type = "upper", 
+         tl.col = "black", 
+         tl.cex = 0.8,
+         col = viridis(100),
+         diag = FALSE)
+#dev.off()
+```
+
+# Moderator analysis {.tabset .tabset-fade .tabset-pills}
+
+Moderator analysis while controlling for age, gender, state and migration back ground. State is defined as Vienna vs. rest, diverse participants dropped due low number of cases ($n = 4$).
+
+```{r}
+d1$state_dicho <- ifelse(d1$state == "Vienna", 1, 0)
+```
+
+```{r}
+d1$state_dicho <- factor(d1$state_dicho, levels = c(0, 1), labels = c("Rest of Austria", "Vienna"))
+```
+
+```{r}
+d2 <- d1 %>% dplyr::select(., 
+             age,
+             gender,
+             state_dicho,
+             migration,
+             ghsq_total,
+             ssosh_total,
+             soep_total,
+             isi_total,
+             cage_total,
+             pss_total,
+             phq_total,
+             gad_total) %>%
+  filter(., gender != "diverse") # N = 2021
+```
+
+## Loneliness
+
+### Model
+
+```{r}
+res1 <- lm(ghsq_total ~ age + gender + state_dicho + migration + soep_total * ssosh_total, data = d2) 
+```
+
+```{r}
+summary(res1)
+```
+
+### CI
+
+```{r}
+cbind(coef(res1), confint(res1, level = 0.95))
+```
+### Residuals
+
+```{r fig.width=4, fig.height=4}
+plot(res1$fitted, res1$residuals)
+```
+
+### Estimated marginal means
+
+```{r}
+# same moderator for all analyses
+m_ssosh_total <- round(mean(d2$ssosh_total, na.rm = TRUE), 2)
+sd_ssosh_total <- round(sd(d2$ssosh_total, na.rm = TRUE), 2)
+```
+
+```{r}
+# varying outcomes
+m_soep_total <- round(mean(d2$soep_total, na.rm = TRUE), 2)
+sd_soep_total <- round(sd(d2$soep_total, na.rm = TRUE), 2)
+```
+
+Differences in different levels of Loneliness.
+
+```{r}
+emm_res1 <- emmeans(res1,  ~ soep_total*ssosh_total,
+  cov.keep = 3, at = list(
+  soep_total = c(round(m_soep_total - sd_soep_total, 2), 
+                 m_soep_total, 
+                 round(m_soep_total + sd_soep_total, 2)),
+  ssosh = c(round(m_ssosh_total - sd_ssosh_total, 2), 
+            m_ssosh_total, 
+            round(m_ssosh_total + sd_ssosh_total,2))), level = 0.95)
+```
+
+```{r}
+summary(emm_res1)
+```
+
+### Simple slopes
+
+```{r}
+simpleSlope_res1 <- emtrends(res1, pairwise ~ ssosh_total, var = "soep_total", cov.keep = 3, 
+                        at = list(ssosh_total = c(round(m_ssosh_total - sd_ssosh_total, 2), 
+                                            m_ssosh_total, 
+                                            round(m_ssosh_total + sd_ssosh_total, 2))), level = 0.95)
+```
+
+```{r}
+summary(simpleSlope_res1)
+```
+### Visualization
+
+```{r}
+plot_res1 <- emmip(res1, ssosh_total ~ soep_total,
+  cov.keep = 3, at = list(
+    soep_total = c(m_soep_total - sd_soep_total, m_soep_total, m_soep_total + sd_soep_total),
+    ssosh_total = c(m_ssosh_total - sd_ssosh_total, 
+                    m_ssosh_total, 
+                    m_ssosh_total + sd_ssosh_total)),
+  xlab = "SOEP (Loneliness)",
+  ylab = "GHSQ (Help Seeking Behavior)",
+  CIs = TRUE, level = 0.95, position = "jitter") +
+ # ggtitle("(A) SOEP (Loneliness)") +
+  theme_minimal() + 
+  scale_color_viridis_d(name = "SSOSH (Self-stigma)", option = "D", begin = 0, end = 1, direction = 1) +
+  #theme(legend.position = "none", plot.margin = unit(c(1, 1, 4, 1), "lines"))
+  theme(legend.position = "bottom", legend.key.size = unit(1.5, "lines"))
+```
+
+```{r}
+#save
+pdf("02_figures/Figure5_Moderation_SOEP.pdf", width = 7, height = 5)
+plot_res1
+dev.off()
+```
+
+## Insomnia
+
+### Model
+
+```{r}
+res2 <- lm(ghsq_total ~ age + gender + state_dicho + migration + isi_total * ssosh_total, data = d2) 
+```
+
+```{r}
+summary(res2)
+```
+
+### CI
+
+```{r}
+cbind(coef(res2), confint(res2, level = 0.95))
+```
+### Residuals
+
+```{r fig.width=4, fig.height=4}
+plot(res2$fitted, res2$residuals)
+```
+
+### Estimated marginal means
+
+```{r}
+# varying outcomes
+m_isi_total <- round(mean(d2$isi_total, na.rm = TRUE), 2)
+sd_isi_total <- round(sd(d2$isi_total, na.rm = TRUE), 2)
+```
+
+Differences in different levels of Insomnia.
+
+```{r}
+emm_res2 <- emmeans(res2,  ~ isi_total*ssosh_total,
+  cov.keep = 3, at = list(
+  isi_total = c(round(m_isi_total - sd_isi_total, 2), 
+                 m_isi_total, 
+                 round(m_isi_total + sd_isi_total, 2)),
+  ssosh = c(round(m_ssosh_total - sd_ssosh_total, 2), 
+            m_ssosh_total, 
+            round(m_ssosh_total + sd_ssosh_total,2))), level = 0.95)
+```
+
+```{r}
+summary(emm_res2)
+```
+### Simple slopes
+
+```{r}
+simpleSlope_res2 <- emtrends(res2, pairwise ~ ssosh_total, var = "isi_total", cov.keep = 3, 
+                        at = list(ssosh_total = c(round(m_ssosh_total - sd_ssosh_total, 2), 
+                                            m_ssosh_total, 
+                                            round(m_ssosh_total + sd_ssosh_total, 2))), level = 0.95)
+```
+
+```{r}
+summary(simpleSlope_res2)
+```
+### Visualization
+
+```{r}
+plot_res2 <- emmip(res2, ssosh_total ~ isi_total,
+  cov.keep = 3, at = list(
+    isi_total = c(m_isi_total - sd_isi_total, m_isi_total, m_isi_total + sd_isi_total),
+    ssosh_total = c(m_ssosh_total - sd_ssosh_total, 
+                    m_ssosh_total, 
+                    m_ssosh_total + sd_ssosh_total)),
+  xlab = "ISI-7 (Insomnia)",
+  ylab = "GHSQ (Help Seeking Behavior)",
+  CIs = TRUE, level = 0.95, position = "jitter") +
+  ggtitle("(B) ISI-7 (Insomnia)") +
+  theme_minimal() + 
+  scale_color_viridis_d(name = "SSOSH (Self-stigma)", option = "D", begin = 0, end = 1, direction = 1) +
+  theme(legend.position = "none", plot.margin = unit(c(1, 1, 4, 1), "lines"))
+```
+
+## Alcohol misuse
+
+### Model
+
+```{r}
+res3 <- lm(ghsq_total ~age + gender + state_dicho + migration + cage_total * ssosh_total, data = d2) 
+```
+
+```{r}
+summary(res3)
+```
+
+### CI
+
+```{r}
+cbind(coef(res3), confint(res3, level = 0.95))
+```
+
+## Stress
+
+### Model
+
+```{r}
+res4 <- lm(ghsq_total ~ age + gender + state_dicho + migration + pss_total * ssosh_total, data = d2) 
+```
+
+```{r}
+summary(res4)
+```
+
+### CI
+
+```{r}
+cbind(coef(res4), confint(res4, level = 0.95))
+```
+
+### Residuals
+
+```{r fig.width=4, fig.height=4}
+plot(res4$fitted, res4$residuals)
+```
+
+### Estimated marginal means
+
+```{r}
+# varying outcomes
+m_pss_total <- round(mean(d2$pss_total, na.rm = TRUE), 2)
+sd_pss_total <- round(sd(d2$pss_total, na.rm = TRUE), 2)
+```
+
+Differences in different levels of Stress.
+
+```{r}
+emm_res4 <- emmeans(res4,  ~ pss_total*ssosh_total,
+  cov.keep = 3, at = list(
+  pss_total = c(round(m_pss_total - sd_pss_total, 2), 
+                 m_pss_total, 
+                 round(m_pss_total + sd_pss_total, 2)),
+  ssosh = c(round(m_ssosh_total - sd_ssosh_total, 2), 
+            m_ssosh_total, 
+            round(m_ssosh_total + sd_ssosh_total,2))), level = 0.95)
+```
+
+```{r}
+summary(emm_res4)
+```
+### Simple slopes
+
+```{r}
+simpleSlope_res4 <- emtrends(res4, pairwise ~ ssosh_total, var = "pss_total", cov.keep = 3, 
+                        at = list(ssosh_total = c(round(m_ssosh_total - sd_ssosh_total, 2), 
+                                            m_ssosh_total, 
+                                            round(m_ssosh_total + sd_ssosh_total, 2))), level = 0.95)
+```
+
+```{r}
+summary(simpleSlope_res4)
+```
+
+### Visualization
+
+```{r}
+plot_res4 <- emmip(res4, ssosh_total ~ pss_total,
+  cov.keep = 3, at = list(
+    pss_total = c(m_pss_total - sd_pss_total, m_pss_total, m_pss_total + sd_pss_total),
+    ssosh_total = c(m_ssosh_total - sd_ssosh_total, 
+                    m_ssosh_total, 
+                    m_ssosh_total + sd_ssosh_total)),
+  xlab = "PSS-4 (Stress)",
+  ylab = "GHSQ (Help Seeking Behavior)",
+  CIs = TRUE, level = 0.95, position = "jitter") +
+  ggtitle("(B) PSS-4 (Stress)") +
+  theme_minimal() + 
+  scale_color_viridis_d(name = "SSOSH (Self-stigma)", option = "D", begin = 0, end = 1, direction = 1) +
+  theme(legend.position = "none", plot.margin = unit(c(1, 1, 4, 1), "lines"))
+```
+
+## Depression
+
+### Model
+
+```{r}
+res5 <- lm(ghsq_total ~ age + gender + state_dicho + migration + phq_total * ssosh_total, data = d2) 
+```
+
+```{r}
+summary(res5)
+```
+
+### CI
+
+```{r}
+cbind(coef(res5), confint(res5, level = 0.95))
+```
+### Residuals
+
+```{r fig.width=4, fig.height=4}
+plot(res5$fitted, res5$residuals)
+```
+
+### Estimated marginal means
+
+```{r}
+# varying outcomes
+m_phq_total <- round(mean(d2$phq_total, na.rm = TRUE), 2)
+sd_phq_total <- round(sd(d2$phq_total, na.rm = TRUE), 2)
+```
+
+Differences in different levels of Depression.
+
+```{r}
+emm_res5 <- emmeans(res5,  ~ phq_total*ssosh_total,
+  cov.keep = 3, at = list(
+  phq_total = c(round(m_phq_total - sd_phq_total, 2), 
+                 m_phq_total, 
+                 round(m_phq_total + sd_phq_total, 2)),
+  ssosh = c(round(m_ssosh_total - sd_ssosh_total, 2), 
+            m_ssosh_total, 
+            round(m_ssosh_total + sd_ssosh_total,2))), level = 0.95)
+```
+
+```{r}
+summary(emm_res5)
+```
+### Simple slopes
+
+```{r}
+simpleSlope_res5 <- emtrends(res5, pairwise ~ ssosh_total, var = "phq_total", cov.keep = 3, 
+                        at = list(ssosh_total = c(round(m_ssosh_total - sd_ssosh_total, 2), 
+                                            m_ssosh_total, 
+                                            round(m_ssosh_total + sd_ssosh_total, 2))), level = 0.95)
+```
+
+```{r}
+summary(simpleSlope_res5)
+```
+
+### Visualization
+
+```{r}
+plot_res5 <- emmip(res5, ssosh_total ~ phq_total,
+  cov.keep = 3, at = list(
+    phq_total = c(m_phq_total - sd_phq_total, m_phq_total, m_phq_total + sd_phq_total),
+    ssosh_total = c(m_ssosh_total - sd_ssosh_total, 
+                    m_ssosh_total, 
+                    m_ssosh_total + sd_ssosh_total)),
+  xlab = "PHQ-9 (Depression)",
+  ylab = "GHSQ (Help Seeking Behavior)",
+  CIs = TRUE, level = 0.95, position = "jitter") +
+  ggtitle("(C) PHQ-9 (Depression)") +
+  theme_minimal() + 
+  scale_color_viridis_d(name = "SSOSH (Self-stigma)", option = "D", begin = 0, end = 1, direction = 1) +
+  theme(legend.position = "none", plot.margin = unit(c(1, 1, 4, 1), "lines"))
+```
+
+## Anxiety
+
+### Model
+
+```{r}
+res6 <- lm(ghsq_total ~ age + gender + state_dicho + migration + gad_total * ssosh_total, data = d2) 
+```
+
+```{r}
+summary(res6)
+```
+
+### CI
+
+```{r}
+cbind(coef(res6), confint(res6, level = 0.95))
+```
+
+### Residuals
+
+```{r fig.width=4, fig.height=4}
+plot(res6$fitted, res6$residuals)
+```
+
+### Estimated marginal means
+
+```{r}
+# varying outcomes
+m_gad_total <- round(mean(d2$gad_total, na.rm = TRUE), 2)
+sd_gad_total <- round(sd(d2$gad_total, na.rm = TRUE), 2)
+```
+
+Differences in different levels of Anxiety.
+
+```{r}
+emm_res6 <- emmeans(res6,  ~ gad_total*ssosh_total,
+  cov.keep = 3, at = list(
+  gad_total = c(round(m_gad_total - sd_gad_total, 2), 
+                 m_gad_total, 
+                 round(m_gad_total + sd_gad_total, 2)),
+  ssosh = c(round(m_ssosh_total - sd_ssosh_total, 2), 
+            m_ssosh_total, 
+            round(m_ssosh_total + sd_ssosh_total,2))), level = 0.95)
+```
+
+```{r}
+summary(emm_res6)
+```
+### Simple slopes
+
+```{r}
+SimpleSlope_res6 <- emtrends(res6, pairwise ~ ssosh_total, var = "gad_total", cov.keep = 3, 
+                        at = list(ssosh_total = c(round(m_ssosh_total - sd_ssosh_total, 2), 
+                                            m_ssosh_total, 
+                                            round(m_ssosh_total + sd_ssosh_total, 2))), level = 0.95)
+```
+
+```{r}
+summary(SimpleSlope_res6)
+```
+### Visualization
+
+```{r}
+plot_res6 <- emmip(res6, ssosh_total ~ gad_total,
+  cov.keep = 3, at = list(
+    gad_total = c(m_gad_total - sd_gad_total, m_gad_total, m_gad_total + sd_gad_total),
+    ssosh_total = c(m_ssosh_total - sd_ssosh_total, 
+                    m_ssosh_total, 
+                    m_ssosh_total + sd_ssosh_total)),
+  xlab = "GAD-7 (Anxiety)",
+  ylab = "GHSQ (Help Seeking Behavior)",
+  CIs = TRUE, level = 0.95, position = "jitter") +
+  ggtitle("(D) GAD-7 (Anxiety)") +
+  theme_minimal() + 
+  scale_color_viridis_d(name = "SSOSH (Self-stigma)", option = "D", begin = 0, end = 1, direction = 1) +
+  theme(legend.position = "bottom", legend.key.size = unit(1.5, "lines"))
+```
+
+
+```{r fig.width=10, fig.height=10}
+# combine plots
+
+#pdf("02_figures/Figure5_Moderation.pdf", width = 10, height = 10)
+#gridExtra::grid.arrange(plot_res1, plot_res2, plot_res3, plot_res4, plot_res5, plot_res6,
+#                        ncol = 3)
+#dev.off()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
